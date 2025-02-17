@@ -85,11 +85,11 @@ class OmniMotorController(Node):
 
     def on_key_press(self, key):
         try:
-            if key == keyboard.Key.space:
+            if hasattr(key, 'char') and key.char == 'c':
                 if not self.calibration_done:
                     self.calibrate_motors()
                     self.calibration_done = True
-                elif not self.closed_loop_enabled:
+                elif hasattr(key, 'char') and key.char == 'l':
                     self.enable_closed_loop_control()
                     self.closed_loop_enabled = True
             elif hasattr(key, 'char') and key.char.isdigit():
