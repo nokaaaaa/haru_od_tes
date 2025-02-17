@@ -85,7 +85,7 @@ class OmniMotorController(Node):
 
     def on_key_press(self, key):
         try:
-            if key == keyboard.Key.enter:
+            if key == keyboard.Key.space:
                 if not self.calibration_done:
                     self.calibrate_motors()
                     self.calibration_done = True
