@@ -7,8 +7,10 @@ import json
 import threading
 
 class ODriveController(Node):
-    def __init__(self, config_path):
+    def __init__(self):
         super().__init__('odrive_controller')
+        self.declare_parameter("config_file", "config.json")
+        config_path = self.get_parameter("config_file").value
         self.get_logger().info(f'Loading config from {config_path}')
         
         with open(config_path, 'r') as file:
@@ -35,9 +37,12 @@ class ODriveController(Node):
     
     def create_motor_callback(self, motor):
         def callback(msg):
-            odrv = self.odrives[motor["serial_number"]]
-            axis = motor["axis"]
-            setattr(odrv.axis0 if axis == 0 else odrv.axis1, 'controller.input_vel', msg.data)
+            odrv = self.odrives.get(motor["serial_number"])
+            if odrv:
+                axis = odrv.axis0 if motor["axis"] == 0 else odrv.axis1
+                axis.controller.input_vel = msg.data
+            else:
+                self.get_logger().error(f'ODrive {motor["serial_number"]} not found!')
         return callback
     
     def joy_callback(self, msg):
@@ -54,7 +59,7 @@ class ODriveController(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = ODriveController(rclpy.get_param('/config_file'))
+    node = ODriveController()
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
