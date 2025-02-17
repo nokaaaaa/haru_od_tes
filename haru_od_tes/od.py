@@ -1,9 +1,10 @@
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32
+from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Joy
 import odrive
 import json
+import math
 import threading
 
 class ODriveController(Node):
@@ -16,15 +17,13 @@ class ODriveController(Node):
         with open(config_path, 'r') as file:
             self.config = json.load(file)
         
+        self.R = self.config.get("R", 0.2)  # ロボットの回転半径
+        self.wheel_radius = self.config.get("wheel_radius", 0.05)  # ホイールの半径
+        
         self.odrives = {}
         self.load_odrives()
         
-        self.subscribers = []
-        for motor in self.config["motors"]:
-            topic_name = motor["topic_name"]
-            sub = self.create_subscription(Float32, topic_name, self.create_motor_callback(motor), 10)
-            self.subscribers.append(sub)
-        
+        self.create_subscription(Twist, '/pid_cmd_vel', self.twist_callback, 10)
         self.joy_sub = self.create_subscription(Joy, '/joy', self.joy_callback, 10)
     
     def load_odrives(self):
@@ -35,18 +34,30 @@ class ODriveController(Node):
                 self.odrives[serial] = odrive.find_any(serial_number=serial)
                 self.get_logger().info(f'Connected to ODrive {serial}')
     
-    def create_motor_callback(self, motor):
-        def callback(msg):
+    def twist_callback(self, msg):
+        Vx = msg.linear.x
+        Vy = msg.linear.y
+        omega = msg.angular.z
+        
+        coeff = 1 / (2 * math.pi * self.wheel_radius)
+        r2 = math.sqrt(2)
+        v1 = coeff * ((-Vx + Vy) / r2 + self.R * omega)
+        v2 = coeff * ((-Vx - Vy) / r2 + self.R * omega)
+        v3 = coeff * ((Vx - Vy) / r2 + self.R * omega)
+        v4 = coeff * ((Vx + Vy) / r2 + self.R * omega)
+        
+        wheel_speeds = [v1, v2, v3, v4]
+        
+        for i, motor in enumerate(self.config["motors"]):
             odrv = self.odrives.get(motor["serial_number"])
             if odrv:
                 axis = odrv.axis0 if motor["axis"] == 0 else odrv.axis1
                 if axis.controller.config.control_mode != 2:
                     self.get_logger().warn(f'Switching {motor["serial_number"]} axis {motor["axis"]} to velocity control mode')
                     axis.controller.config.control_mode = 2  # CONTROL_MODE_VELOCITY_CONTROL
-                axis.controller.input_vel = msg.data
+                axis.controller.input_vel = wheel_speeds[i]
             else:
                 self.get_logger().error(f'ODrive {motor["serial_number"]} not found!')
-        return callback
     
     def joy_callback(self, msg):
         if msg.buttons[1] == 1:
