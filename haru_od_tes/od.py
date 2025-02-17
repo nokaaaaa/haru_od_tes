@@ -40,6 +40,9 @@ class ODriveController(Node):
             odrv = self.odrives.get(motor["serial_number"])
             if odrv:
                 axis = odrv.axis0 if motor["axis"] == 0 else odrv.axis1
+                if axis.controller.config.control_mode != 2:
+                    self.get_logger().warn(f'Switching {motor["serial_number"]} axis {motor["axis"]} to velocity control mode')
+                    axis.controller.config.control_mode = 2  # CONTROL_MODE_VELOCITY_CONTROL
                 axis.controller.input_vel = msg.data
             else:
                 self.get_logger().error(f'ODrive {motor["serial_number"]} not found!')
@@ -54,6 +57,8 @@ class ODriveController(Node):
         elif msg.buttons[3] == 1:
             self.get_logger().info('Starting closed-loop control...')
             for odrv in self.odrives.values():
+                odrv.axis0.controller.config.control_mode = 2  # Set velocity control mode
+                odrv.axis1.controller.config.control_mode = 2  # Set velocity control mode
                 odrv.axis0.requested_state = 8  # AXIS_STATE_CLOSED_LOOP_CONTROL
                 odrv.axis1.requested_state = 8
 
