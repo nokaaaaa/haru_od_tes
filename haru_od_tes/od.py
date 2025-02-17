@@ -33,6 +33,7 @@ class OmniMotorController(Node):
         self.listener = keyboard.Listener(on_press=self.on_key_press)
         self.listener.start()
         self.calibration_done = False
+        self.closed_loop_enabled = False
 
         self.R = self.config.get("R", 0.2)  # 中心からホイールまでの距離(m)
         self.r = self.config.get("wheel_radius", 0.05)  # ホイール半径(m)
@@ -51,9 +52,6 @@ class OmniMotorController(Node):
                     raise
 
     def cmd_vel_callback(self, msg):
-        """
-        /pid_cmd_vel (Twist) メッセージを受け取ってモーター速度を計算し適用
-        """
         Vx = msg.linear.x
         Vy = msg.linear.y
         omega = msg.angular.z
@@ -87,12 +85,17 @@ class OmniMotorController(Node):
 
     def on_key_press(self, key):
         try:
-            if key == keyboard.Key.space:
+            if key == keyboard.Key.enter:
                 if not self.calibration_done:
                     self.calibrate_motors()
                     self.calibration_done = True
-                else:
+                elif not self.closed_loop_enabled:
                     self.enable_closed_loop_control()
+                    self.closed_loop_enabled = True
+            elif hasattr(key, 'char') and key.char.isdigit():
+                motor_index = int(key.char)
+                if 0 <= motor_index < len(self.motor_configs):
+                    self.test_motor(motor_index)
         except Exception as e:
             self.get_logger().error(f"キー入力処理中にエラーが発生しました: {e}")
 
@@ -109,6 +112,14 @@ class OmniMotorController(Node):
             for axis in [odrv.axis0, odrv.axis1]:
                 self.get_logger().info(f"シリアル {serial_number} のモーターをクローズドループ制御に設定中...")
                 axis.requested_state = AXIS_STATE_CLOSED_LOOP_CONTROL
+
+    def test_motor(self, motor_index):
+        motor_config = self.motor_configs[motor_index]
+        serial_number = motor_config["serial_number"]
+        axis = motor_config["axis"]
+        speed = 2.0  # 任意の速度値
+        self.set_motor_speed(serial_number, axis, speed)
+        self.get_logger().info(f"モーター {motor_index} (シリアル {serial_number}, 軸 {axis}) を回転させました。")
 
 def main(args=None):
     rclpy.init(args=args)
