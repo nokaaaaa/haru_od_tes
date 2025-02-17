@@ -7,19 +7,21 @@ from odrive.enums import AXIS_STATE_CLOSED_LOOP_CONTROL, AXIS_STATE_FULL_CALIBRA
 import json
 import time
 
-# JSON設定の読み込み
-CONFIG_FILE = "config.json"
-with open(CONFIG_FILE, "r") as f:
-    CONFIG = json.load(f)
-
 class ODriveController(Node):
     def __init__(self):
         super().__init__('odrive_controller')
+        self.declare_parameter('config_file', 'config.json')
+        config_file = self.get_parameter('config_file').get_parameter_value().string_value
+        
+        self.get_logger().info(f"Loading configuration from {config_file}")
+        with open(config_file, "r") as f:
+            self.config = json.load(f)
+        
         self.get_logger().info("ODrive Controller Node Started")
         
         # ODriveデバイスの接続
         self.odrives = {}
-        for motor in CONFIG["motors"]:
+        for motor in self.config["motors"]:
             serial = motor["serial_number"]
             if serial not in self.odrives:
                 self.get_logger().info(f"Connecting to ODrive {serial}...")
@@ -28,7 +30,7 @@ class ODriveController(Node):
         
         # 各モーター用の購読者を作成
         self.subscribers = []
-        for motor in CONFIG["motors"]:
+        for motor in self.config["motors"]:
             sub = self.create_subscription(Float32, motor["topic_name"],
                                            lambda msg, m=motor: self.set_motor_speed(m, msg),
                                            10)
