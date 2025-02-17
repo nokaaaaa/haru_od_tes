@@ -1,141 +1,82 @@
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist
-import json
+from std_msgs.msg import Float32
+from sensor_msgs.msg import Joy
 import odrive
-import math
-from odrive.enums import *
-from pynput import keyboard  # キーボード入力を監視
+from odrive.enums import AXIS_STATE_CLOSED_LOOP_CONTROL, AXIS_STATE_FULL_CALIBRATION_SEQUENCE
+import json
+import time
 
-class OmniMotorController(Node):
-    def __init__(self, config_file):
-        super().__init__('omni_motor_controller')
+# JSON設定の読み込み
+CONFIG_FILE = "config.json"
+with open(CONFIG_FILE, "r") as f:
+    CONFIG = json.load(f)
 
-        self.get_logger().info(f"設定ファイルを読み込んでいます: {config_file}")
-        with open(config_file, "r") as file:
-            self.config = json.load(file)
-
-        self.motor_configs = self.config.get("motors", [])
-        if not self.motor_configs:
-            self.get_logger().error("設定ファイルに 'motors' が存在しません。処理を中断します。")
-            raise ValueError("設定ファイルが無効です。")
-
+class ODriveController(Node):
+    def __init__(self):
+        super().__init__('odrive_controller')
+        self.get_logger().info("ODrive Controller Node Started")
+        
+        # ODriveデバイスの接続
         self.odrives = {}
-        self.connect_odrives()
-
-        self.subscription = self.create_subscription(
-            Twist,
-            '/pid_cmd_vel',
-            self.cmd_vel_callback,
-            10
-        )
-
-        self.listener = keyboard.Listener(on_press=self.on_key_press)
-        self.listener.start()
-        self.calibration_done = False
-        self.closed_loop_enabled = False
-
-        self.R = self.config.get("R", 0.2)  # 中心からホイールまでの距離(m)
-        self.r = self.config.get("wheel_radius", 0.05)  # ホイール半径(m)
-
-    def connect_odrives(self):
-        for motor_config in self.motor_configs:
-            serial_number = motor_config["serial_number"]
-
-            if serial_number not in self.odrives:
-                self.get_logger().info(f"シリアル番号 {serial_number} のODriveに接続しています...")
-                try:
-                    self.odrives[serial_number] = odrive.find_any(serial_number=serial_number)
-                    self.get_logger().info(f"ODrive {serial_number} に接続しました。")
-                except Exception as e:
-                    self.get_logger().error(f"ODrive {serial_number} に接続できません: {e}")
-                    raise
-
-    def cmd_vel_callback(self, msg):
-        Vx = msg.linear.x
-        Vy = msg.linear.y
-        omega = msg.angular.z
-
-        coeff = 1 / (2*math.pi*self.r)
-        r2 = math.sqrt(2)
-        v1 = coeff * ((-Vx + Vy)/r2 + self.R * omega)
-        v2 = coeff * ((-Vx - Vy)/r2 + self.R * omega)
-        v3 = coeff * ((Vx - Vy)/r2 + self.R * omega)
-        v4 = coeff * ((Vx + Vy)/r2 + self.R * omega)
-
-        speeds = [v1, v2, v3, v4]
-
-        for i, motor_config in enumerate(self.motor_configs):
-            serial_number = motor_config["serial_number"]
-            axis = motor_config["axis"]
-            self.set_motor_speed(serial_number, axis, speeds[i])
-
-    def set_motor_speed(self, serial_number, axis, speed):
-        if serial_number not in self.odrives:
-            self.get_logger().error(f"シリアル {serial_number} のODriveが見つかりません。")
-            return
-
-        odrv = self.odrives[serial_number]
-        motor = odrv.axis0 if axis == 0 else odrv.axis1
-
-        motor.controller.config.control_mode = CONTROL_MODE_VELOCITY_CONTROL
-        motor.controller.input_vel = speed
-
-        self.get_logger().info(f"シリアル {serial_number}, 軸 {axis} のモーター速度を {speed} に設定しました。")
-
-    def on_key_press(self, key):
-        try:
-            if key == keyboard.Key.space:
-                if not self.calibration_done:
-                    self.calibrate_motors()
-                    self.calibration_done = True
-                elif key == keyboard.Key.down:
-                    self.enable_closed_loop_control()
-                    self.closed_loop_enabled = True
-            elif hasattr(key, 'char') and key.char.isdigit():
-                motor_index = int(key.char)
-                if 0 <= motor_index < len(self.motor_configs):
-                    self.test_motor(motor_index)
-        except Exception as e:
-            self.get_logger().error(f"キー入力処理中にエラーが発生しました: {e}")
-
-    def calibrate_motors(self):
-        self.get_logger().info("すべてのモーターをキャリブレーションしています...")
-        for serial_number, odrv in self.odrives.items():
-            for axis in [odrv.axis0, odrv.axis1]:
-                self.get_logger().info(f"シリアル {serial_number} のモーターをキャリブレーション中...")
+        for motor in CONFIG["motors"]:
+            serial = motor["serial_number"]
+            if serial not in self.odrives:
+                self.get_logger().info(f"Connecting to ODrive {serial}...")
+                self.odrives[serial] = odrive.find_any(serial_number=serial)
+                self.get_logger().info(f"Connected to ODrive {serial}")
+        
+        # 各モーター用の購読者を作成
+        self.subscribers = []
+        for motor in CONFIG["motors"]:
+            sub = self.create_subscription(Float32, motor["topic_name"],
+                                           lambda msg, m=motor: self.set_motor_speed(m, msg),
+                                           10)
+            self.subscribers.append(sub)
+        
+        # Joyトピック購読
+        self.create_subscription(Joy, '/joy', self.joy_callback, 10)
+    
+    def set_motor_speed(self, motor, msg):
+        """ 指定されたモーターに速度指令を送る """
+        serial = motor["serial_number"]
+        axis = motor["axis"]
+        odrive_obj = self.odrives.get(serial)
+        if odrive_obj:
+            odrive_axis = odrive_obj.axis0 if axis == 0 else odrive_obj.axis1
+            odrive_axis.controller.input_vel = msg.data
+        
+    def joy_callback(self, msg):
+        """ /joyメッセージを受け取って処理 """
+        if msg.buttons[1] == 1:
+            self.calibrate_all_motors()
+        elif msg.buttons[3] == 1:
+            self.start_closed_loop()
+        
+    def calibrate_all_motors(self):
+        """ すべてのモーターをキャリブレーション """
+        self.get_logger().info("Starting motor calibration...")
+        for serial, odrive_obj in self.odrives.items():
+            for axis in [odrive_obj.axis0, odrive_obj.axis1]:
                 axis.requested_state = AXIS_STATE_FULL_CALIBRATION_SEQUENCE
-
-    def enable_closed_loop_control(self):
-        self.get_logger().info("すべてのモーターをクローズドループ制御に設定しています...")
-        for serial_number, odrv in self.odrives.items():
-            for axis in [odrv.axis0, odrv.axis1]:
-                self.get_logger().info(f"シリアル {serial_number} のモーターをクローズドループ制御に設定中...")
+                time.sleep(0.1)
+        self.get_logger().info("Calibration started")
+    
+    def start_closed_loop(self):
+        """ すべてのモーターをクローズドループ制御に切り替える """
+        self.get_logger().info("Switching motors to closed-loop control...")
+        for serial, odrive_obj in self.odrives.items():
+            for axis in [odrive_obj.axis0, odrive_obj.axis1]:
                 axis.requested_state = AXIS_STATE_CLOSED_LOOP_CONTROL
-
-    def test_motor(self, motor_index):
-        motor_config = self.motor_configs[motor_index]
-        serial_number = motor_config["serial_number"]
-        axis = motor_config["axis"]
-        speed = 2.0  # 任意の速度値
-        self.set_motor_speed(serial_number, axis, speed)
-        self.get_logger().info(f"モーター {motor_index} (シリアル {serial_number}, 軸 {axis}) を回転させました。")
+                time.sleep(0.1)
+        self.get_logger().info("Motors in closed-loop control")
 
 def main(args=None):
     rclpy.init(args=args)
-    node = Node('argument_parser')
-    config_file = node.declare_parameter('config_file', '').value
-    if not config_file:
-        node.get_logger().error("パラメータ 'config_file' が指定されていません！ '--ros-args --param config_file:=<path_to_config>' を使用してください。")
-        return
-
-    try:
-        motor_controller = OmniMotorController(config_file)
-        rclpy.spin(motor_controller)
-    except Exception as e:
-        node.get_logger().error(f"ノードの起動中にエラーが発生しました: {e}")
-    finally:
-        rclpy.shutdown()
+    node = ODriveController()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
