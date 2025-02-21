@@ -1,11 +1,10 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from sensor_msgs.msg import Joy
+from std_msgs.msg import Bool, Float32
 import odrive
 import json
 import math
-import threading
 
 class ODriveController(Node):
     def __init__(self):
@@ -17,14 +16,18 @@ class ODriveController(Node):
         with open(config_path, 'r') as file:
             self.config = json.load(file)
         
-        self.R = self.config.get("R", 0.2)  # ロボットの回転半径
-        self.wheel_radius = self.config.get("wheel_radius", 0.05)  # ホイールの半径
+        self.R = self.config.get("R", 0.2)
+        self.wheel_radius = self.config.get("wheel_radius", 0.05)
         
         self.odrives = {}
         self.load_odrives()
         
         self.create_subscription(Twist, '/pid_cmd_vel', self.twist_callback, 10)
-        self.joy_sub = self.create_subscription(Joy, '/joy', self.joy_callback, 10)
+        self.create_subscription(Bool, '/calib', self.calib_callback, 10)
+        self.create_subscription(Bool, '/closed', self.closed_loop_callback, 10)
+        
+        for motor in self.config["motors"]:
+            self.create_subscription(Float32, motor["topic_name"], lambda msg, m=motor: self.motor_callback(msg, m), 10)
     
     def load_odrives(self):
         for motor in self.config["motors"]:
@@ -54,22 +57,32 @@ class ODriveController(Node):
                 axis = odrv.axis0 if motor["axis"] == 0 else odrv.axis1
                 if axis.controller.config.control_mode != 2:
                     self.get_logger().warn(f'Switching {motor["serial_number"]} axis {motor["axis"]} to velocity control mode')
-                    axis.controller.config.control_mode = 2  # CONTROL_MODE_VELOCITY_CONTROL
+                    axis.controller.config.control_mode = 2  
                 axis.controller.input_vel = wheel_speeds[i]
             else:
                 self.get_logger().error(f'ODrive {motor["serial_number"]} not found!')
     
-    def joy_callback(self, msg):
-        if msg.buttons[1] == 1:
+    def motor_callback(self, msg, motor):
+        odrv = self.odrives.get(motor["serial_number"])
+        if odrv:
+            axis = odrv.axis0 if motor["axis"] == 0 else odrv.axis1
+            axis.controller.input_vel = msg.data
+        else:
+            self.get_logger().error(f'ODrive {motor["serial_number"]} not found!')
+    
+    def calib_callback(self, msg):
+        if msg.data:
             self.get_logger().info('Calibrating all motors...')
             for odrv in self.odrives.values():
                 odrv.axis0.requested_state = 3  # AXIS_STATE_FULL_CALIBRATION_SEQUENCE
                 odrv.axis1.requested_state = 3
-        elif msg.buttons[3] == 1:
+    
+    def closed_loop_callback(self, msg):
+        if msg.data:
             self.get_logger().info('Starting closed-loop control...')
             for odrv in self.odrives.values():
-                odrv.axis0.controller.config.control_mode = 2  # Set velocity control mode
-                odrv.axis1.controller.config.control_mode = 2  # Set velocity control mode
+                odrv.axis0.controller.config.control_mode = 2
+                odrv.axis1.controller.config.control_mode = 2
                 odrv.axis0.requested_state = 8  # AXIS_STATE_CLOSED_LOOP_CONTROL
                 odrv.axis1.requested_state = 8
 
